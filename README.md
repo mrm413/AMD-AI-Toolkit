@@ -150,6 +150,7 @@ Copy-Item "$env:USERPROFILE\.ollama\models\blobs\sha256-THE_DIGEST" "models\my-m
 | `fix_rocblas_local.ps1` | Fixes AMD library paths (run once) |
 | `hip_example.py` | Basic test - loads model and generates text |
 | `hip_autoconfig.py` | Smart loader - auto-detects best GPU settings |
+| `gpu_thread_helper.py` | Thread-safe wrapper for multi-threaded servers |
 | `xena.py` | Security-focused AI assistant example |
 | `tools\llama-quantize.exe` | Compress models to smaller sizes |
 
@@ -183,6 +184,50 @@ Run `.\fix_rocblas_local.ps1` again.
 Edit `run_hip_model.ps1` and `rebuild_hip_gfx1031.ps1`:
 - RX 6800/6900: Change `gfx1031` to `gfx1030`
 - RX 7900: Change `gfx1031` to `gfx1100` and `10.3.0` to `11.0.0`
+
+## Building Multi-Threaded Servers (FastAPI, Flask, etc.)
+
+**Important:** If you're building a web server that handles multiple requests, you'll hit a thread issue.
+
+### The Problem
+rocBLAS (AMD's GPU math library) initializes its context **per-thread**. Web frameworks like FastAPI/uvicorn handle requests in different threads, so GPU calls from those threads fail with:
+```
+GGML_ASSERT: ggml/src/ggml-cuda/ggml-cuda.cu:340: !"MUL_MAT failed, shared object initialization failed"
+```
+
+### The Solution
+Route ALL GPU operations through a single dedicated thread. We've included a helper:
+
+```python
+# In your server code
+from gpu_thread_helper import gpu_generate
+
+# Instead of:
+# response = llm.generate(prompt)
+
+# Use:
+response = gpu_generate(llm, prompt, max_tokens=500)
+```
+
+See `gpu_thread_helper.py` for the full implementation. Drop it into your project and wrap your generate calls.
+
+### Quick Fix (Copy-Paste)
+```python
+from concurrent.futures import ThreadPoolExecutor
+import threading
+
+_gpu_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="GPU")
+_gpu_lock = threading.Lock()
+
+def gpu_generate(model, prompt, **kwargs):
+    """Thread-safe GPU generation wrapper."""
+    def _generate():
+        with _gpu_lock:
+            return model(prompt, **kwargs)
+    return _gpu_executor.submit(_generate).result(timeout=600)
+```
+
+This ensures rocBLAS initializes once and all GPU work happens in that same thread.
 
 ## Model Quantization
 
